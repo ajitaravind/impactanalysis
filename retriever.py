@@ -3,7 +3,7 @@ import logging
 from typing import List, Dict, Any
 from neo4j import GraphDatabase
 from dotenv import load_dotenv, find_dotenv
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
 from langchain.schema.output_parser import StrOutputParser
 from pydantic import BaseModel, Field
