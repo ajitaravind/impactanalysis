@@ -5,7 +5,7 @@ from dotenv import load_dotenv, find_dotenv
 
 from langchain_openai import OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
-from pinecone import Pinecone, ServerlessSpec
+from pinecone import Pinecone
 
 # Configure logging
 logging.basicConfig(

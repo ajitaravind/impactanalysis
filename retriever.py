@@ -1,7 +1,7 @@
 import os
 import logging
 import re
-from typing import List, Dict, Any, Tuple, Set, Optional
+from typing import List, Dict, Any, Tuple, Optional
 from neo4j import GraphDatabase
 from dotenv import load_dotenv, find_dotenv
 from langchain_openai import ChatOpenAI

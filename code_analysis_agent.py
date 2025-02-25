@@ -2,6 +2,7 @@ import logging
 from typing import Dict, Sequence, TypedDict, Annotated, List
 import operator
 import os
+import re
 
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
@@ -79,42 +80,6 @@ def structured_retrieval_node(state: CodeAnalysisState, retriever: LLMRetriever)
             "messages": [AIMessage(content=f"Error in retrieval: {str(e)}")]
         }
 
-def vector_retrieval_node(state: CodeAnalysisState, vector_retriever: VectorRetriever = None) -> Dict:
-    """Retrieves information using vector search for semantic matching."""
-    try:
-        logger.info(f"Performing vector search for: {state['user_question']}")
-        
-        # Check if vector retriever is available
-        if vector_retriever is None:
-            logger.warning("Vector retriever not available, skipping vector search")
-            return {
-                "vector_results": {
-                    "query": state['user_question'],
-                    "raw_results": [],
-                    "response": "Vector search not available. Using only structured retrieval."
-                },
-                "messages": [AIMessage(content="Vector search not available")]
-            }
-        
-        # Use the vector retriever to get information
-        results = vector_retriever.retrieve(state['user_question'])
-        
-        return {
-            "vector_results": results,
-            "messages": [AIMessage(content="Retrieved semantic code information")]
-        }
-        
-    except Exception as e:
-        logger.error(f"Error in vector retrieval node: {str(e)}", exc_info=True)
-        return {
-            "vector_results": {
-                "query": state['user_question'],
-                "raw_results": [],
-                "response": f"Error retrieving information: {str(e)}"
-            },
-            "messages": [AIMessage(content=f"Error in vector search: {str(e)}")]
-        }
-
 ###############################################################################
 # Analysis Node
 ###############################################################################
@@ -176,10 +141,6 @@ def analysis_node(state: CodeAnalysisState) -> Dict:
         
         # Check if we have vector results integrated in the retrieval results
         has_vector_results = retrieval_results.get("has_vector_results", False)
-        
-        # We don't need to process vector_results separately anymore since they're integrated
-        vector_raw_results = []
-        vector_response = "Vector results are now integrated with structured results."
         
         # Check if we have any results
         if not graph_results:
