@@ -2,4 +2,5 @@
 myenv/
 sampleagent.py
 sampleretriever.py
+sampleingestor.py
 __pycache__/

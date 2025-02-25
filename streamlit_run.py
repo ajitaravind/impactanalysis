@@ -29,12 +29,33 @@ st.markdown("""
 @st.cache_resource
 def get_agent():
     """Initialize and cache the CodeAnalysisAgent."""
+    # Load environment variables
+    load_dotenv(find_dotenv(), override=True)
+    
+    # Get environment variables
     NEO4J_URI = os.environ.get("NEO4J_URI")
     NEO4J_USER = os.environ.get("NEO4J_USERNAME")
     NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD")
     OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+    PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
+    PINECONE_ENVIRONMENT = os.environ.get("PINECONE_ENVIRONMENT")
     
-    return CodeAnalysisAgent(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, OPENAI_API_KEY)
+    # Check if we have the required environment variables
+    if not all([NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, OPENAI_API_KEY]):
+        st.error("Missing required environment variables. Please check your .env file.")
+        return None
+    
+    # Initialize the agent with the correct parameters
+    return CodeAnalysisAgent(
+        neo4j_uri=NEO4J_URI, 
+        neo4j_user=NEO4J_USER, 
+        neo4j_password=NEO4J_PASSWORD, 
+        pinecone_index_name="code-repository",  # Use the correct index name
+        pinecone_namespace="code-analysis",
+        openai_api_key=OPENAI_API_KEY,
+        pinecone_api_key=PINECONE_API_KEY,
+        pinecone_environment=PINECONE_ENVIRONMENT
+    )
 
 # Get the agent
 agent = get_agent()
