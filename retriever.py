@@ -1,13 +1,16 @@
 import os
 import logging
 import re
-from typing import List, Dict, Any, Tuple, Set
+from typing import List, Dict, Any, Tuple, Set, Optional
 from neo4j import GraphDatabase
 from dotenv import load_dotenv, find_dotenv
 from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
 from langchain.schema.output_parser import StrOutputParser
 from pydantic import BaseModel, Field
+
+# Import VectorRetriever
+from vector_retriever import VectorRetriever
 
 # Configure logging
 logging.basicConfig(
@@ -40,8 +43,12 @@ class LLMRetriever:
     An LLM-enhanced retriever for a Neo4j code database.
     """
 
-    def __init__(self, uri, user, password, openai_api_key=None):
+    def __init__(self, uri, user, password, openai_api_key=None, 
+                 vector_retriever: Optional[VectorRetriever] = None):
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
+        
+        # Initialize vector retriever
+        self.vector_retriever = vector_retriever
         
         # Initialize LLM components
         self.llm = ChatOpenAI(
@@ -136,26 +143,36 @@ class LLMRetriever:
 
     def expand_query_terms(self, elements: List[str]) -> List[str]:
         """
-        Expand query terms with synonyms and related terms to improve search coverage.
-        Uses an LLM to dynamically generate expansions based on the context.
+        Expand query terms with a small number of high-quality synonyms.
+        Limits total expansion to at most 5 terms regardless of input size.
         
         Args:
             elements: List of extracted code elements
             
         Returns:
-            Expanded list of terms
+            Expanded list of terms with original elements prioritized
         """
         if not elements:
             return []
-            
-        expanded_terms = set(elements)
+        
+        # If we already have 5 or more terms, just use those (prioritize original terms)
+        if len(elements) >= 5:
+            logger.info(f"Using only original terms (already have {len(elements)} terms)")
+            return elements[:5]  # Take at most 5 original terms
+        
+        # We need to expand, but only enough to get to 5 total terms
+        num_expansions_needed = min(5 - len(elements), 5)  # At most 5 expansions
+        expanded_terms = set(elements)  # Start with original terms
+        
+        if num_expansions_needed <= 0:
+            return list(expanded_terms)
         
         # Create a simple prompt for the LLM to generate term expansions
         class TermExpansions(BaseModel):
             """Expanded programming terms and related concepts."""
             
             expanded_terms: List[str] = Field(
-                description="List of expanded programming terms and related concepts that are similar to or related to the input terms"
+                description=f"List of exactly {num_expansions_needed} expanded programming terms"
             )
         
         try:
@@ -163,43 +180,40 @@ class LLMRetriever:
             expansion_prompt = ChatPromptTemplate.from_messages([
                 (
                     "system",
-                    """You are an expert in programming languages and code analysis.
-                    Your task is to expand the given code-related terms with synonyms, related concepts,
-                    different naming conventions, and variations that might be used in code.
+                    f"""You are an expert in programming languages and code analysis.
+                    Your task is to expand the given code-related terms with the MOST RELEVANT synonyms
+                    or related concepts that would be useful for searching code.
                     
-                    For each term, consider:
-                    1. Common synonyms in programming contexts
-                    2. Related programming concepts
-                    3. Different naming conventions (camelCase, snake_case, PascalCase)
-                    4. Singular/plural forms
-                    5. Verb/noun variations
-                    
-                    Return ONLY a list of expanded terms without any explanations or categorization.
+                    Return EXACTLY {num_expansions_needed} terms total - not per input term, but in total.
+                    Focus on terms that would most likely appear in actual code or documentation.
                     """
                 ),
                 (
                     "human",
-                    "Generate expanded terms for these code elements: {elements}"
+                    "Generate exactly {num_expansions} expanded terms for these code elements: {elements}"
                 ),
             ])
             
-            # Create the chain with structured output - just one LLM call
+            # Create the chain with structured output
             expansion_chain = expansion_prompt | self.llm.with_structured_output(TermExpansions, method="function_calling")
             
             # Get expansions from the LLM
-            result = expansion_chain.invoke({"elements": elements})
+            result = expansion_chain.invoke({
+                "elements": elements,
+                "num_expansions": num_expansions_needed
+            })
             
-            # Simply add all the expanded terms to our set
-            expanded_terms.update(result.expanded_terms)
+            # Add the expanded terms to our set
+            expanded_terms.update(result.expanded_terms[:num_expansions_needed])
             
-            logger.info(f"LLM expanded terms: {result.expanded_terms}")
+            logger.info(f"LLM expanded terms: {result.expanded_terms[:num_expansions_needed]}")
         
         except Exception as e:
             logger.error(f"Error in LLM term expansion: {str(e)}")
             logger.info("Falling back to original terms only")
         
         logger.info(f"Final expanded terms: {expanded_terms}")
-        return list(expanded_terms)
+        return list(expanded_terms)[:5]  # Final safety check - never return more than 5 terms
 
     def explore_relationships(self, initial_results: List[Dict]) -> List[Tuple[str, Dict]]:
         """
@@ -315,37 +329,29 @@ class LLMRetriever:
                 }))
         
         return relationship_queries
-
     def generate_multi_stage_queries(self, query_string: str, elements: List[str]) -> List[Tuple[str, Dict]]:
         """
-        Generate multiple Cypher queries with different strategies.
+        Generate a limited set of targeted Cypher queries.
         
         Args:
             query_string: The original query string
-            elements: Extracted and expanded code elements
+            elements: Extracted and expanded code elements (limited to 5 max)
             
         Returns:
             List of (query, params) tuples
         """
         queries = []
         
-        # 1. Direct name matches for functions
-        function_name_query = """
-        MATCH (f:Function)
-        WHERE toLower(f.name) CONTAINS toLower($term)
-        RETURN f.name as name, f.docstring as docstring, 
-               'Function' as type, f.start_line as start_line, f.end_line as end_line
+        # 1. Combined query for functions and classes (more efficient)
+        combined_query = """
+        MATCH (n)
+        WHERE (n:Function OR n:Class) AND toLower(n.name) CONTAINS toLower($term)
+        RETURN n.name as name, n.docstring as docstring, 
+               CASE WHEN n:Function THEN 'Function' ELSE 'Class' END as type,
+               n.start_line as start_line, n.end_line as end_line
         """
         
-        # 2. Direct name matches for classes
-        class_name_query = """
-        MATCH (c:Class)
-        WHERE toLower(c.name) CONTAINS toLower($term)
-        RETURN c.name as name, c.docstring as docstring, 
-               'Class' as type, c.start_line as start_line, c.end_line as end_line
-        """
-        
-        # 3. Docstring content matches
+        # 2. Docstring content query (for semantic matches)
         docstring_query = """
         MATCH (n)
         WHERE (n:Function OR n:Class) AND toLower(n.docstring) CONTAINS toLower($term)
@@ -354,26 +360,28 @@ class LLMRetriever:
                n.start_line as start_line, n.end_line as end_line
         """
         
-        # 4. Class methods (for more specific queries)
-        class_method_query = """
-        MATCH (c:Class)-[:DEFINES]->(f:Function)
-        WHERE toLower(c.name) CONTAINS toLower($class_term) AND toLower(f.name) CONTAINS toLower($method_term)
-        RETURN c.name as class_name, f.name as method_name, f.docstring as docstring,
-               f.start_line as start_line, f.end_line as end_line
-        """
-        
-        # Add single-term queries
+        # Add queries for each term (but keep it limited)
         for term in elements:
-            queries.append((function_name_query, {"term": term}))
-            queries.append((class_name_query, {"term": term}))
-            queries.append((docstring_query, {"term": term}))
+            queries.append((combined_query, {"term": term}))
+            
+            # Only do docstring queries for key terms to reduce query count
+            if len(term) > 3:  # Only for non-trivial terms
+                queries.append((docstring_query, {"term": term}))
         
-        # Add class-method combinations
-        for i, term1 in enumerate(elements):
-            for term2 in elements[i+1:]:
-                # Try both combinations of class/method
-                queries.append((class_method_query, {"class_term": term1, "method_term": term2}))
-                queries.append((class_method_query, {"class_term": term2, "method_term": term1}))
+        # Only generate class-method combinations if we have few terms
+        if len(elements) <= 3:
+            # 3. Class methods (for more specific queries)
+            class_method_query = """
+            MATCH (c:Class)-[:DEFINES]->(f:Function)
+            WHERE toLower(c.name) CONTAINS toLower($class_term) AND toLower(f.name) CONTAINS toLower($method_term)
+            RETURN c.name as class_name, f.name as method_name, f.docstring as docstring,
+                   f.start_line as start_line, f.end_line as end_line
+            """
+            
+            # Add class-method combinations (but only for the first few terms)
+            for i, term1 in enumerate(elements[:2]):  # Only use first 2 terms
+                for term2 in elements[i+1:3]:  # Only combine with next term up to 3rd term
+                    queries.append((class_method_query, {"class_term": term1, "method_term": term2}))
         
         # Also include the original LLM-generated query as a fallback
         try:
@@ -398,10 +406,12 @@ class LLMRetriever:
             logger.error(f"Error generating original query: {e}")
         
         return queries
+        return queries
 
     def retrieve(self, query_string: str) -> Dict[str, Any]:
         """
         Retrieves information from the Neo4j database based on a natural language query.
+        Also performs vector search if a vector retriever is available.
         
         Args:
             query_string: The natural language query.
@@ -412,7 +422,48 @@ class LLMRetriever:
         """
         logger.info(f"Processing query: {query_string}")
         
-        # Step 1: Extract code elements from the query
+        # Step 1: Perform vector search if available
+        vector_results = []
+        if self.vector_retriever:
+            try:
+                logger.info("Performing vector search with VectorRetriever")
+                # Add more detailed logging
+                logger.info(f"Vector retriever configuration: index={self.vector_retriever.index_name}, namespace={self.vector_retriever.namespace}")
+                
+                vector_search_results = self.vector_retriever.retrieve(query_string)
+                logger.info(f"Vector search completed with status: {'success' if vector_search_results else 'no results'}")
+                
+                # Extract the raw results from the vector search
+                if vector_search_results and "raw_results" in vector_search_results:
+                    logger.info(f"Vector search returned {len(vector_search_results['raw_results'])} raw results")
+                    for result in vector_search_results["raw_results"]:
+                        # Convert vector results to a format compatible with Neo4j results
+                        formatted_result = {
+                            "name": result["metadata"].get("code_name", "Unknown"),
+                            "type": result["metadata"].get("code_type", "Code"),
+                            "content": result["content"],
+                            "source": result["metadata"].get("source", "Unknown"),
+                            "relevance_score": result.get("relevance_score", 0),
+                            "is_vector_result": True  # Flag to identify vector results
+                        }
+                        
+                        # Add line numbers if available
+                        if "start_line" in result["metadata"]:
+                            formatted_result["start_line"] = result["metadata"]["start_line"]
+                        if "end_line" in result["metadata"]:
+                            formatted_result["end_line"] = result["metadata"]["end_line"]
+                            
+                        vector_results.append(formatted_result)
+                    
+                    logger.info(f"Processed {len(vector_results)} vector search results")
+                else:
+                    logger.warning("Vector search returned no usable results")
+            except Exception as e:
+                logger.error(f"Error in vector search: {str(e)}", exc_info=True)  # Add full traceback
+        else:
+            logger.warning("Vector retriever not available, skipping vector search")
+        
+        # Step 2: Extract code elements from the query
         try:
             code_elements = self.entity_chain.invoke({"question": query_string})
             logger.info(f"Extracted code elements: {code_elements.elements}")
@@ -420,13 +471,13 @@ class LLMRetriever:
             logger.error(f"Error extracting code elements: {e}")
             code_elements = CodeElements(elements=[])
         
-        # Step 2: Expand query terms
+        # Step 3: Expand query terms
         expanded_elements = self.expand_query_terms(code_elements.elements)
         
-        # Step 3: Generate multiple Cypher queries
+        # Step 4: Generate multiple Cypher queries
         query_candidates = self.generate_multi_stage_queries(query_string, expanded_elements)
         
-        # Step 4: Execute queries until we find results
+        # Step 5: Execute queries until we find results
         all_results = []
         successful_query = None
         
@@ -452,7 +503,7 @@ class LLMRetriever:
             except Exception as e:
                 logger.error(f"Error executing query {query}: {e}")
         
-        # Step 5: If we found some results, explore relationships
+        # Step 6: If we found some results, explore relationships
         if all_results:
             logger.info("Exploring relationships between found components")
             relationship_queries = self.explore_relationships(all_results)
@@ -470,7 +521,12 @@ class LLMRetriever:
                 except Exception as e:
                     logger.error(f"Error executing relationship query: {e}")
         
-        # Step 6: Deduplicate results based on name and type
+        # Step 7: Add vector search results to all_results
+        if vector_results:
+            all_results.extend(vector_results)
+            logger.info(f"Added {len(vector_results)} vector search results to all results")
+        
+        # Step 8: Deduplicate results based on name and type
         unique_results = []
         seen = set()
         
@@ -489,11 +545,11 @@ class LLMRetriever:
                 seen.add(key)
                 unique_results.append(result)
         
-        logger.info(f"Found {len(unique_results)} unique results after relationship exploration")
+        logger.info(f"Found {len(unique_results)} unique results after deduplication")
         
-        # Step 7: Generate a natural language response
+        # Step 9: Generate a natural language response
         try:
-            # Enhance the response prompt to include relationship information
+            # Enhance the response prompt to include relationship information and vector results
             enhanced_prompt = ChatPromptTemplate.from_messages([
                 (
                     "system",
@@ -504,6 +560,8 @@ class LLMRetriever:
                     4. Keep explanations concise but complete
                     5. Pay special attention to relationships between components (calls, contains, inherits)
                     6. Organize your response to show how components interact in the system
+                    7. Incorporate both structured database results and vector search results in your analysis
+                    8. For vector search results, focus on the code content and its relevance to the query
                     """
                 ),
                 (
@@ -534,7 +592,8 @@ class LLMRetriever:
             "query": query_string,
             "cypher_query": successful_query or "No successful query",
             "raw_results": unique_results,
-            "response": response
+            "response": response,
+            "has_vector_results": len(vector_results) > 0
         }
 
     def close(self):
@@ -544,6 +603,23 @@ class LLMRetriever:
 def main():
     # Initialize the retriever
     retriever = LLMRetriever(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, OPENAI_API_KEY)
+
+    # Optionally initialize vector retriever
+    vector_retriever = None
+    try:
+        PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
+        PINECONE_ENVIRONMENT = os.environ.get("PINECONE_ENVIRONMENT")
+        
+        if PINECONE_API_KEY and PINECONE_ENVIRONMENT:
+            vector_retriever = VectorRetriever(
+                openai_api_key=OPENAI_API_KEY,
+                pinecone_api_key=PINECONE_API_KEY,
+                pinecone_environment=PINECONE_ENVIRONMENT
+            )
+            retriever.vector_retriever = vector_retriever
+            print("Vector retriever initialized successfully")
+    except Exception as e:
+        print(f"Failed to initialize vector retriever: {e}")
 
     while True:
         query = input("Enter your query (or 'exit'): ")
@@ -574,6 +650,8 @@ def main():
                 print(f"\n... and {len(result['raw_results']) - 5} more results")
     
     retriever.close()
+    if vector_retriever:
+        vector_retriever.close()
 
 if __name__ == "__main__":
     main()

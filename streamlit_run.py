@@ -27,7 +27,7 @@ st.markdown("""
 
 # Initialize the agent (do this only once)
 @st.cache_resource
-def get_agent():
+def get_agent(relevance_threshold=0.5):
     """Initialize and cache the CodeAnalysisAgent."""
     # Load environment variables
     load_dotenv(find_dotenv(), override=True)
@@ -54,11 +54,9 @@ def get_agent():
         pinecone_namespace="code-analysis",
         openai_api_key=OPENAI_API_KEY,
         pinecone_api_key=PINECONE_API_KEY,
-        pinecone_environment=PINECONE_ENVIRONMENT
+        pinecone_environment=PINECONE_ENVIRONMENT,
+        relevance_threshold=relevance_threshold
     )
-
-# Get the agent
-agent = get_agent()
 
 # Header
 st.title("🔍 Neo4j Code Analysis Assistant")
@@ -66,6 +64,21 @@ st.markdown("""
     Ask questions about your codebase and get detailed insights from the Neo4j knowledge graph.
     Type your question below and click 'Analyze' or press Enter.
 """)
+
+# Add sidebar configuration
+with st.sidebar:
+    st.markdown("### Configuration")
+    relevance_threshold = st.slider(
+        "Vector Search Relevance Threshold", 
+        min_value=0.0, 
+        max_value=1.0, 
+        value=0.5, 
+        step=0.05,
+        help="Lower values will include more results with lower relevance scores"
+    )
+
+# Get the agent with the configured threshold
+agent = get_agent(relevance_threshold=relevance_threshold)
 
 # Create a form for input
 with st.form(key='query_form'):

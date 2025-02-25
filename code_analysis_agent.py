@@ -146,14 +146,12 @@ def create_analysis_agent():
         ("system", system_msg),
         ("human", """Question: {question}
         
-        Structured Information (Graph Database):
+        Structured Information (Database):
         - Cypher Query: {cypher_query}
         - Database Results: {graph_results}
         - Initial Analysis: {graph_response}
         
-        Semantic Information (Vector Database):
-        - Vector Results: {vector_results}
-        - Vector Analysis: {vector_response}
+        Vector Results Included: {has_vector_results}
         
         Suggested Alternative Queries: {suggestions}
         
@@ -165,38 +163,39 @@ def create_analysis_agent():
     return prompt | llm
 
 def analysis_node(state: CodeAnalysisState) -> Dict:
-    """Analyzes the retrieved information to provide a comprehensive answer."""
+    """Analyzes the retrieved information to answer the user's question."""
     try:
-        logger.info("Starting code analysis")
+        logger.info("Analyzing retrieved information")
         
-        # Get graph database results
-        retrieval_results = state["retrieval_results"]
+        # Get the retrieval results
+        retrieval_results = state.get("retrieval_results", {})
+        
+        # Extract the raw results and response
         graph_results = retrieval_results.get("raw_results", [])
-        graph_response = retrieval_results.get("response", "No graph database results available")
+        graph_response = retrieval_results.get("response", "No response available")
         
-        # Get vector database results
-        vector_results = state.get("vector_results", {})
-        vector_raw_results = vector_results.get("raw_results", [])
-        vector_response = vector_results.get("response", "No vector database results available")
+        # Check if we have vector results integrated in the retrieval results
+        has_vector_results = retrieval_results.get("has_vector_results", False)
         
-        # Check if we have any meaningful results
-        if not graph_results and not vector_raw_results:
-            logger.warning("No results found in either database for the query")
+        # We don't need to process vector_results separately anymore since they're integrated
+        vector_raw_results = []
+        vector_response = "Vector results are now integrated with structured results."
+        
+        # Check if we have any results
+        if not graph_results:
+            logger.warning("No results found in either retrieval method")
             
-            # Generate suggestions based on the query
-            query = state["user_question"]
+            # Generate suggestions for alternative queries
             suggestions = []
+            query = state["user_question"]
             
-            # Check for common naming patterns
+            # Suggest camelCase
             if " " in query:
-                suggestions.append(f"Try '{query.replace(' ', '_')}' (with underscores)")
-            if "_" in query:
-                suggestions.append(f"Try '{query.replace('_', ' ')}' (without underscores)")
+                camel_case = query.split(" ")[0] + "".join(word.capitalize() for word in query.split(" ")[1:])
+                suggestions.append(f"Try '{camel_case}' (camelCase format)")
             
-            # Check for camelCase vs snake_case
-            import re
-            if re.search(r'[a-z][A-Z]', query):  # camelCase detected
-                # Convert camelCase to snake_case
+            # Suggest snake_case
+            if " " in query:
                 snake_case = re.sub(r'([a-z])([A-Z])', r'\1_\2', query).lower()
                 suggestions.append(f"Try '{snake_case}' (snake_case format)")
             
@@ -209,8 +208,7 @@ def analysis_node(state: CodeAnalysisState) -> Dict:
             "cypher_query": retrieval_results.get("cypher_query", "No query available"),
             "graph_results": graph_results,
             "graph_response": graph_response,
-            "vector_results": vector_raw_results,
-            "vector_response": vector_response,
+            "has_vector_results": has_vector_results,
             "suggestions": retrieval_results.get("suggestions", [])
         })
         
@@ -232,20 +230,18 @@ def analysis_node(state: CodeAnalysisState) -> Dict:
 ###############################################################################
 # Graph Construction
 ###############################################################################
-def create_code_analysis_graph(retriever: LLMRetriever, vector_retriever: VectorRetriever = None) -> StateGraph:
+def create_code_analysis_graph(retriever: LLMRetriever) -> StateGraph:
     """Creates and configures the code analysis graph."""
     
     graph = StateGraph(CodeAnalysisState)
     
-    # Add nodes
+    # Add nodes - vector retrieval is now integrated into the LLMRetriever
     graph.add_node("structured_retrieve", lambda state: structured_retrieval_node(state, retriever))
-    graph.add_node("vector_retrieve", lambda state: vector_retrieval_node(state, vector_retriever))
     graph.add_node("analyze", analysis_node)
     
-    # Configure edges - always use both retrievers in sequence
+    # Configure edges - simplified flow since vector retrieval is integrated
     graph.set_entry_point("structured_retrieve")
-    graph.add_edge("structured_retrieve", "vector_retrieve")
-    graph.add_edge("vector_retrieve", "analyze")
+    graph.add_edge("structured_retrieve", "analyze")
     graph.add_edge("analyze", END)
     
     return graph.compile()
@@ -265,13 +261,11 @@ class CodeAnalysisAgent:
         pinecone_namespace="code-analysis",
         openai_api_key=None,
         pinecone_api_key=None,
-        pinecone_environment=None
+        pinecone_environment=None,
+        relevance_threshold=0.5
     ):
         """Initialize the agent with database connection parameters."""
-        # Set up Neo4j retriever
-        self.retriever = LLMRetriever(neo4j_uri, neo4j_user, neo4j_password, openai_api_key)
-        
-        # Set up vector retriever
+        # Set up vector retriever first
         self.vector_retriever = None
         
         # Ensure pinecone_index_name is not accidentally set to an API key
@@ -288,14 +282,24 @@ class CodeAnalysisAgent:
                 namespace=pinecone_namespace,
                 openai_api_key=openai_api_key,
                 pinecone_api_key=pinecone_api_key,
-                pinecone_environment=pinecone_environment
+                pinecone_environment=pinecone_environment,
+                relevance_threshold=relevance_threshold
             )
             logger.info(f"Vector retriever initialized with Pinecone index: {pinecone_index_name}")
         except Exception as e:
             logger.warning(f"Failed to initialize vector retriever: {str(e)}")
         
+        # Set up Neo4j retriever with vector retriever
+        self.retriever = LLMRetriever(
+            neo4j_uri, 
+            neo4j_user, 
+            neo4j_password, 
+            openai_api_key, 
+            vector_retriever=self.vector_retriever
+        )
+        
         # Create the graph
-        self.graph_executor = create_code_analysis_graph(self.retriever, self.vector_retriever)
+        self.graph_executor = create_code_analysis_graph(self.retriever)
     
     def analyze(self, question: str) -> str:
         """Analyze code based on a natural language question."""
@@ -340,6 +344,7 @@ def main():
     parser = argparse.ArgumentParser(description="Code Analysis Agent")
     parser.add_argument("--pinecone_index", default="code-repository", help="Name of the Pinecone index")
     parser.add_argument("--pinecone_namespace", default="code-analysis", help="Namespace within the Pinecone index")
+    parser.add_argument("--relevance_threshold", type=float, default=0.5, help="Minimum relevance score (0-1) for vector search results")
     args = parser.parse_args()
     
     # Load environment variables
@@ -361,7 +366,8 @@ def main():
         pinecone_namespace=args.pinecone_namespace,
         openai_api_key=OPENAI_API_KEY,
         pinecone_api_key=PINECONE_API_KEY,
-        pinecone_environment=PINECONE_ENVIRONMENT
+        pinecone_environment=PINECONE_ENVIRONMENT,
+        relevance_threshold=args.relevance_threshold
     )
     
     print("Code Analysis Agent")
