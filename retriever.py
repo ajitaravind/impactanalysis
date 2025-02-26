@@ -12,6 +12,18 @@ from pydantic import BaseModel, Field
 # Import VectorRetriever
 from vector_retriever import VectorRetriever
 
+"""
+Code Database Retriever
+
+This module provides functionality to query and retrieve code information from a Neo4j database.
+
+Note on relationship types:
+- Actual Neo4j relationships in the database: CONTAINS, DEFINES, CALLS, INHERITS_FROM, IMPORTS, DECORATED_BY
+- Virtual relationships (prefixed with VIRTUAL_) are used only for display purposes in query results
+  and do not exist as actual relationships in the database. They represent the inverse or derived
+  relationships based on the actual relationships.
+"""
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -50,10 +62,19 @@ class LLMRetriever:
         # Initialize vector retriever
         self.vector_retriever = vector_retriever
         
+        # Valid relationship types in the database
+        self.valid_relationship_types = [
+            "CONTAINS", "DEFINES", "CALLS", "INHERITS_FROM", 
+            "IMPORTS", "DECORATED_BY"
+        ]
+        
+        # Validate relationship types in the database
+        self._validate_relationship_types()
+        
         # Initialize LLM components
         self.llm = ChatOpenAI(
             temperature=0, 
-            model_name="gpt-4o-mini",  # You can use a smaller model to reduce costs
+            model_name="gpt-4o",  # You can use a smaller model to reduce costs
             api_key=openai_api_key
         )
         
@@ -85,17 +106,24 @@ class LLMRetriever:
                 
                 Here are the node types and relationships in our database:
                 - File nodes with properties: path
-                - Function nodes with properties: name, start_line, end_line, docstring
-                - Class nodes with properties: name, start_line, end_line, docstring
-                - Comment nodes with properties: text
+                - Function nodes with properties: name, start_line, end_line, docstring, parameters
+                - Class nodes with properties: name, start_line, end_line, docstring, superclasses
+                - Comment nodes with properties: text, line
+                - Import nodes with properties: name, module_name
+                - Variable nodes with properties: name, value
                 
                 Relationships:
                 - (File)-[:CONTAINS]->(Function)
                 - (File)-[:CONTAINS]->(Class)
-                - (File)-[:HAS_COMMENT]->(Comment)
+                - (File)-[:CONTAINS]->(Comment)
+                - (File)-[:CONTAINS]->(Variable)
+                - (File)-[:IMPORTS]->(Import)
                 - (Class)-[:DEFINES]->(Function) (for methods)
                 - (Function)-[:CALLS]->(Function)
                 - (Class)-[:CALLS]->(Function)
+                - (Class)-[:INHERITS_FROM]->(Class) (for inheritance)
+                - (Function)-[:DECORATED_BY]->(Decorator)
+                - (Class)-[:DECORATED_BY]->(Decorator)
                 
                 IMPORTANT: Return only the raw Cypher query without any markdown formatting, code blocks, or explanations.
                 Do not include ```cypher or ``` in your response.
@@ -141,6 +169,24 @@ class LLMRetriever:
         # Create response generation chain
         self.response_chain = self.response_prompt | self.llm | StrOutputParser()
 
+    def _validate_relationship_types(self):
+        """
+        Validate the relationship types in the database.
+        """
+        with self.driver.session() as session:
+            result = session.run("CALL db.relationshipTypes()")
+            relationship_types = [record[0] for record in result]
+            
+            # Check for unknown relationship types
+            for relationship_type in relationship_types:
+                if relationship_type not in self.valid_relationship_types:
+                    logger.warning(f"Unknown relationship type '{relationship_type}' found in the database")
+            
+            # Check for missing relationship types
+            for required_type in self.valid_relationship_types:
+                if required_type not in relationship_types:
+                    logger.warning(f"Required relationship type '{required_type}' not found in the database")
+                    
     def expand_query_terms(self, elements: List[str]) -> List[str]:
         """
         Expand query terms with a small number of high-quality synonyms.
@@ -237,7 +283,7 @@ class LLMRetriever:
                 MATCH (caller:Function)-[:CALLS]->(callee:Function {name: $function_name})
                 RETURN caller.name as name, caller.docstring as docstring,
                        'Function' as type, caller.start_line as start_line,
-                       caller.end_line as end_line, 'CALLS' as relationship_type,
+                       caller.end_line as end_line, 'VIRTUAL_CALLS' as relationship_type,
                        $function_name as target_name, 'caller' as role
                 """
                 relationship_queries.append((callers_query, {"function_name": function_name}))
@@ -247,7 +293,7 @@ class LLMRetriever:
                 MATCH (caller:Function {name: $function_name})-[:CALLS]->(callee:Function)
                 RETURN callee.name as name, callee.docstring as docstring,
                        'Function' as type, callee.start_line as start_line,
-                       callee.end_line as end_line, 'IS_CALLED_BY' as relationship_type,
+                       callee.end_line as end_line, 'VIRTUAL_IS_CALLED_BY' as relationship_type,
                        $function_name as source_name, 'callee' as role
                 """
                 relationship_queries.append((callees_query, {"function_name": function_name}))
@@ -257,7 +303,7 @@ class LLMRetriever:
                 MATCH (c:Class)-[:DEFINES]->(f:Function {name: $function_name})
                 RETURN c.name as name, c.docstring as docstring,
                        'Class' as type, c.start_line as start_line,
-                       c.end_line as end_line, 'CONTAINS_METHOD' as relationship_type,
+                       c.end_line as end_line, 'VIRTUAL_CONTAINS_METHOD' as relationship_type,
                        $function_name as method_name, 'container' as role
                 """
                 relationship_queries.append((container_query, {"function_name": function_name}))
@@ -271,7 +317,7 @@ class LLMRetriever:
                 MATCH (c:Class {name: $class_name})-[:DEFINES]->(f:Function)
                 RETURN f.name as name, f.docstring as docstring,
                        'Function' as type, f.start_line as start_line,
-                       f.end_line as end_line, 'DEFINED_BY' as relationship_type,
+                       f.end_line as end_line, 'VIRTUAL_DEFINED_BY' as relationship_type,
                        $class_name as class_name, 'method' as role
                 """
                 relationship_queries.append((methods_query, {"class_name": class_name}))
@@ -281,7 +327,7 @@ class LLMRetriever:
                 MATCH (c:Class {name: $class_name})-[:INHERITS_FROM]->(parent:Class)
                 RETURN parent.name as name, parent.docstring as docstring,
                        'Class' as type, parent.start_line as start_line,
-                       parent.end_line as end_line, 'INHERITS_FROM' as relationship_type,
+                       parent.end_line as end_line, 'VIRTUAL_INHERITS_FROM' as relationship_type,
                        $class_name as child_name, 'parent' as role
                 """
                 relationship_queries.append((parent_query, {"class_name": class_name}))
@@ -291,7 +337,7 @@ class LLMRetriever:
                 MATCH (child:Class)-[:INHERITS_FROM]->(c:Class {name: $class_name})
                 RETURN child.name as name, child.docstring as docstring,
                        'Class' as type, child.start_line as start_line,
-                       child.end_line as end_line, 'INHERITED_BY' as relationship_type,
+                       child.end_line as end_line, 'VIRTUAL_INHERITED_BY' as relationship_type,
                        $class_name as parent_name, 'child' as role
                 """
                 relationship_queries.append((child_query, {"class_name": class_name}))
@@ -307,7 +353,7 @@ class LLMRetriever:
                 WHERE f.name <> $method_name
                 RETURN f.name as name, f.docstring as docstring,
                        'Function' as type, f.start_line as start_line,
-                       f.end_line as end_line, 'RELATED_METHOD' as relationship_type,
+                       f.end_line as end_line, 'VIRTUAL_RELATED_METHOD' as relationship_type,
                        $class_name as class_name, $method_name as related_to_method, 'related_method' as role
                 """
                 relationship_queries.append((related_methods_query, {
@@ -320,7 +366,7 @@ class LLMRetriever:
                 MATCH (c:Class {name: $class_name})-[:DEFINES]->(f:Function {name: $method_name})-[:CALLS]->(called:Function)
                 RETURN called.name as name, called.docstring as docstring,
                        'Function' as type, called.start_line as start_line,
-                       called.end_line as end_line, 'CALLED_BY_METHOD' as relationship_type,
+                       called.end_line as end_line, 'VIRTUAL_CALLED_BY_METHOD' as relationship_type,
                        $class_name as class_name, $method_name as method_name, 'called_by_method' as role
                 """
                 relationship_queries.append((method_calls_query, {
@@ -329,6 +375,7 @@ class LLMRetriever:
                 }))
         
         return relationship_queries
+
     def generate_multi_stage_queries(self, query_string: str, elements: List[str]) -> List[Tuple[str, Dict]]:
         """
         Generate a limited set of targeted Cypher queries.
@@ -405,7 +452,6 @@ class LLMRetriever:
         except Exception as e:
             logger.error(f"Error generating original query: {e}")
         
-        return queries
         return queries
 
     def retrieve(self, query_string: str) -> Dict[str, Any]:

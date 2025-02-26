@@ -124,7 +124,7 @@ def create_analysis_agent():
         clearly indicate this and suggest alternative approaches:""")
     ])
     
-    llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
+    llm = ChatOpenAI(model_name="gpt-4o", temperature=0)
     return prompt | llm
 
 def analysis_node(state: CodeAnalysisState) -> Dict:
