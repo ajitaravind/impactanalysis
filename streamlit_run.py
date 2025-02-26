@@ -8,7 +8,7 @@ load_dotenv(find_dotenv(), override=True)
 
 # Configure the Streamlit page
 st.set_page_config(
-    page_title="Neo4j Code Analysis Assistant",
+    page_title="Code Analysis Assistant",
     page_icon="🔍",
     layout="wide"
 )
@@ -59,9 +59,9 @@ def get_agent(relevance_threshold=0.5):
     )
 
 # Header
-st.title("🔍 Neo4j Code Analysis Assistant")
+st.title("🔍 Code Analysis Assistant")
 st.markdown("""
-    Ask questions about your codebase and get detailed insights from the Neo4j knowledge graph.
+    Ask questions about your codebase and get detailed.
     Type your question below and click 'Analyze' or press Enter.
 """)
 
@@ -129,7 +129,7 @@ with st.sidebar:
     st.markdown("### About")
     st.markdown("""
         This tool helps you analyze and understand your codebase using a 
-        Neo4j knowledge graph-based approach. You can ask questions about:
+        knowledge graph-based approach. You can ask questions about:
         
         - Code structure and organization
         - Function implementations and relationships
@@ -150,6 +150,6 @@ with st.sidebar:
 
 st.markdown("---")
 st.markdown(
-    "Made with ❤️ using Streamlit, LangChain, LangGraph, and Neo4j",
-    help="This application uses a Neo4j knowledge graph to analyze code structure and relationships."
+    "Made with ❤️ using Streamlit, LangChain, LangGraph, Pinecone and Neo4j",
+    help="This application uses a knowledge graph to analyze code structure and relationships."
 )
