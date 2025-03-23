@@ -100,32 +100,45 @@ def create_analysis_agent():
     - Describe how different parts of the code interact
     - Use technical language appropriate for software developers
     
-    IMPORTANT: If no relevant information is found in the database results, clearly state that 
-    the requested code element was not found in the codebase. Do NOT generate hypothetical 
-    explanations about what the code might do based on the name alone. Instead, suggest 
-    alternative search terms or approaches that might yield better results, including any 
-    provided suggestions.
+    If the user is asking about impact analysis or how to implement a new feature:
+    - Identify specific files, functions, and classes that would need to be modified
+    - Suggest new components that might need to be created
+    - Prioritize changes based on their importance and complexity
+    - Consider architectural patterns and existing code organization
+    - Suggest a step-by-step implementation plan
+    - Identify potential risks and mitigations
+    
+    Impact analysis questions typically include phrases like:
+    - "What changes would be needed to..."
+    - "How to implement..."
+    - "What would it take to add..."
+    - "Impact of adding..."
+    - "How to introduce..."
     """
-
+    
+    human_msg = """Question: {question}
+    
+    Cypher Query: {cypher_query}
+    
+    Graph Results: {graph_results}
+    
+    Graph Response: {graph_response}
+    
+    Vector Results Available: {has_vector_results}
+    
+    Suggestions: {suggestions}
+    
+    Please provide a detailed technical analysis. If this is an impact analysis question about implementing a new feature, structure your response as an implementation plan with affected components and required changes:
+    """
+    
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_msg),
-        ("human", """Question: {question}
-        
-        Structured Information (Database):
-        - Cypher Query: {cypher_query}
-        - Database Results: {graph_results}
-        - Initial Analysis: {graph_response}
-        
-        Vector Results Included: {has_vector_results}
-        
-        Suggested Alternative Queries: {suggestions}
-        
-        Please provide a comprehensive analysis of this code. If no relevant information was found,
-        clearly indicate this and suggest alternative approaches:""")
+        ("human", human_msg)
     ])
     
-    llm = ChatOpenAI(model_name="gpt-4o", temperature=0)
-    return prompt | llm
+    model = ChatOpenAI(temperature=0, model="gpt-4o")
+    
+    return prompt | model
 
 def analysis_node(state: CodeAnalysisState) -> Dict:
     """Analyzes the retrieved information to answer the user's question."""
